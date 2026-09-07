@@ -5,15 +5,12 @@ import {
   BarChart3,
   CalendarDays,
   Check,
-  ChevronRight,
-  Crown,
-  Home,
   Lock,
   RefreshCw,
-  ScrollText,
   Shield,
   Trophy,
   UserPlus,
+  type LucideIcon,
 } from "lucide-react";
 import {
   Line,
@@ -23,23 +20,22 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { useMemo, useState } from "react";
-import { allGames, currentWeek, games, picks as historicalPicks, players as demoPlayers, season, seededCurrentPick } from "@/lib/demo-data";
+import { useEffect, useMemo, useState } from "react";
+import { currentWeek, games, picks as historicalPicks, players as demoPlayers, season, seededCurrentPick } from "@/lib/demo-data";
 import { formatKickoff, formatPoints, formatSpread } from "@/lib/format";
 import { getOpponent, getUnderdog, hasGameStarted, potentialPoints } from "@/lib/scoring";
 import { buildChart, buildStandings } from "@/lib/standings";
+import { createClient } from "@/lib/supabase/client";
 import { getTeam } from "@/lib/teams";
 import type { Game, Pick, Player } from "@/lib/types";
 
-type Tab = "home" | "pick" | "week" | "standings" | "history" | "rules" | "profile" | "admin";
+type Tab = "pick" | "week" | "standings" | "history" | "profile" | "admin";
 
-const navItems: { tab: Tab; label: string; icon: typeof Home }[] = [
-  { tab: "home", label: "Home", icon: Home },
+const navItems: { tab: Tab; label: string; icon: LucideIcon }[] = [
   { tab: "pick", label: "Pick", icon: Shield },
   { tab: "week", label: "Week", icon: CalendarDays },
   { tab: "standings", label: "Standings", icon: Trophy },
   { tab: "history", label: "History", icon: BarChart3 },
-  { tab: "rules", label: "Rules", icon: ScrollText },
   { tab: "admin", label: "Admin", icon: Lock },
 ];
 
@@ -50,7 +46,8 @@ const weekOneWindow = {
 };
 
 export function AppShell() {
-  const [activeTab, setActiveTab] = useState<Tab>("home");
+  const supabaseConfigured = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+  const [activeTab, setActiveTab] = useState<Tab>("pick");
   const [roster, setRoster] = useState<Player[]>(demoPlayers);
   const [currentUserId, setCurrentUserId] = useState(demoPlayers[0].id);
   const [allPicks, setAllPicks] = useState<Pick[]>([...historicalPicks, seededCurrentPick]);
@@ -58,15 +55,92 @@ export function AppShell() {
   const [pendingGame, setPendingGame] = useState<Game | null>(null);
   const [oddsMode, setOddsMode] = useState<"demo" | "live" | "error">("demo");
   const [oddsStatus, setOddsStatus] = useState("Showing the real 2026 Week 1 NFL schedule with demo DraftKings-style lines until ODDS_API_KEY is configured.");
+  const [authEmail, setAuthEmail] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(supabaseConfigured);
+  const [dataMode, setDataMode] = useState<"demo" | "supabase">("demo");
   const currentUser = roster.find((player) => player.id === currentUserId) ?? roster[0];
+  const isAdmin = dataMode === "demo" ? currentUser.role === "admin" : currentUser.role === "admin" && Boolean(authEmail);
+  const visibleNavItems = navItems.filter((item) => item.tab !== "admin" || isAdmin);
+  const activeView = activeTab === "admin" && !isAdmin ? "pick" : activeTab;
   const myCurrentPick = allPicks.find((pick) => pick.userId === currentUser.id && pick.week === currentWeek);
   const revealed = Boolean(myCurrentPick);
   const standings = useMemo(() => buildStandings(roster, allPicks), [roster, allPicks]);
   const chart = useMemo(() => buildChart(roster, allPicks, currentWeek), [roster, allPicks]);
 
-  function confirmPick(game: Game) {
+  useEffect(() => {
+    if (!supabaseConfigured) return;
+
+    const supabase = createClient();
+    let mounted = true;
+
+    async function hydrate() {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!mounted) return;
+
+      setAuthEmail(session?.user.email ?? null);
+      if (session?.user) {
+        await fetch("/api/profile", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+        await loadLeagueData();
+      }
+      setAuthLoading(false);
+    }
+
+    hydrate();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      setAuthEmail(session?.user.email ?? null);
+      if (session?.user) {
+        await fetch("/api/profile", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+        await loadLeagueData();
+      }
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, [supabaseConfigured]);
+
+  async function loadLeagueData() {
+    const response = await fetch("/api/league", { cache: "no-store" });
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (Array.isArray(payload.players) && payload.players.length > 0) setRoster(payload.players);
+    if (Array.isArray(payload.games) && payload.games.length > 0) {
+      setWeekGames(payload.games.sort(sortByKickoff));
+      setOddsMode("live");
+    }
+    if (Array.isArray(payload.picks)) setAllPicks(payload.picks);
+    if (payload.currentUserId) setCurrentUserId(payload.currentUserId);
+    setDataMode("supabase");
+  }
+
+  async function confirmPick(game: Game) {
     const underdog = getUnderdog(game);
     if (!underdog) return;
+    if (dataMode === "supabase") {
+      const response = await fetch("/api/picks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          season,
+          week: currentWeek,
+          gameId: game.id,
+          selectedTeamId: underdog.teamId,
+        }),
+      });
+      if (response.ok) {
+        await loadLeagueData();
+        setPendingGame(null);
+        setActiveTab("week");
+      }
+      return;
+    }
+
     const nextPick: Pick = {
       id: `p-${Date.now()}`,
       userId: currentUser.id,
@@ -86,7 +160,7 @@ export function AppShell() {
       nextPick,
     ]);
     setPendingGame(null);
-    setActiveTab("home");
+    setActiveTab("week");
   }
 
   async function refreshOdds() {
@@ -153,7 +227,7 @@ export function AppShell() {
     <div className="min-h-screen bg-[#080c12] text-white">
       <div className="fixed inset-x-0 top-0 z-20 border-b border-white/10 bg-[#080c12]/90 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6">
-          <button className="flex items-center gap-3" onClick={() => setActiveTab("home")} aria-label="Home">
+          <button className="flex items-center gap-3" onClick={() => setActiveTab("pick")} aria-label="Pick board">
             <div className="flex h-11 w-11 items-center justify-center rounded bg-red-600 shadow-[0_0_28px_rgba(227,24,55,0.35)]">
               <Shield className="h-6 w-6" />
             </div>
@@ -163,8 +237,8 @@ export function AppShell() {
             </div>
           </button>
           <div className="hidden items-center gap-2 md:flex">
-            {navItems.map((item) => (
-              <NavButton key={item.tab} {...item} active={activeTab === item.tab} onClick={() => setActiveTab(item.tab)} />
+            {visibleNavItems.map((item) => (
+              <NavButton key={item.tab} {...item} active={activeView === item.tab} onClick={() => setActiveTab(item.tab)} />
             ))}
           </div>
           <button
@@ -178,19 +252,20 @@ export function AppShell() {
       </div>
 
       <main className="mx-auto max-w-7xl px-4 pb-28 pt-24 sm:px-6 md:pb-10">
-        {activeTab === "home" && (
-          <Dashboard
-            myPick={myCurrentPick}
-            standings={standings}
-            allPicks={allPicks}
-            roster={roster}
-            weekGames={weekGames}
-            revealed={revealed}
-            chart={chart}
-            onPick={() => setActiveTab("pick")}
-          />
+        {supabaseConfigured && !authEmail && (
+          <MagicLinkPanel loading={authLoading} onSignedIn={async () => loadLeagueData()} />
         )}
-        {activeTab === "pick" && (
+        {supabaseConfigured && authEmail && (
+          <div className="mb-5 rounded border border-emerald-400/25 bg-emerald-400/10 p-3 text-sm font-bold text-emerald-100">
+            Signed in as {authEmail}. This device will stay signed in unless you log out.
+          </div>
+        )}
+        {!supabaseConfigured && (
+          <div className="mb-5 rounded border border-amber-400/25 bg-amber-400/10 p-3 text-sm font-bold text-amber-100">
+            Local demo mode. Add Supabase environment variables in Vercel to enable friend magic links and shared picks.
+          </div>
+        )}
+        {activeView === "pick" && (
           <PickScreen
             myPick={myCurrentPick}
             weekGames={weekGames}
@@ -198,12 +273,19 @@ export function AppShell() {
             onSelect={setPendingGame}
           />
         )}
-        {activeTab === "week" && <WeekScreen allPicks={allPicks} roster={roster} revealed={revealed} />}
-        {activeTab === "standings" && <StandingsScreen standings={standings} />}
-        {activeTab === "history" && <HistoryScreen allPicks={allPicks} roster={roster} chart={chart} />}
-        {activeTab === "rules" && <RulesScreen />}
-        {activeTab === "profile" && <ProfileScreen roster={roster} currentUserId={currentUser.id} setCurrentUserId={setCurrentUserId} />}
-        {activeTab === "admin" && (
+        {activeView === "week" && <WeekScreen allPicks={allPicks} roster={roster} revealed={revealed} />}
+        {activeView === "standings" && <StandingsScreen standings={standings} />}
+        {activeView === "history" && <HistoryScreen allPicks={allPicks} roster={roster} chart={chart} />}
+        {activeView === "profile" && (
+          <ProfileScreen
+            roster={roster}
+            currentUserId={currentUser.id}
+            setCurrentUserId={setCurrentUserId}
+            authEmail={authEmail}
+            dataMode={dataMode}
+          />
+        )}
+        {activeView === "admin" && (
           <AdminScreen
             oddsStatus={oddsStatus}
             oddsMode={oddsMode}
@@ -217,9 +299,9 @@ export function AppShell() {
       </main>
 
       <div className="fixed inset-x-0 bottom-0 z-20 border-t border-white/10 bg-[#080c12]/95 px-2 py-2 backdrop-blur md:hidden">
-        <div className="mx-auto grid max-w-2xl grid-cols-4 gap-1 sm:grid-cols-7">
-          {navItems.map((item) => (
-            <MobileNavButton key={item.tab} {...item} active={activeTab === item.tab} onClick={() => setActiveTab(item.tab)} />
+        <div className="mx-auto grid max-w-2xl gap-1" style={{ gridTemplateColumns: `repeat(${visibleNavItems.length}, minmax(0, 1fr))` }}>
+          {visibleNavItems.map((item) => (
+            <MobileNavButton key={item.tab} {...item} active={activeView === item.tab} onClick={() => setActiveTab(item.tab)} />
           ))}
         </div>
       </div>
@@ -229,67 +311,74 @@ export function AppShell() {
   );
 }
 
-function Dashboard({
-  myPick,
-  standings,
-  allPicks,
-  roster,
-  weekGames,
-  revealed,
-  chart,
-  onPick,
-}: {
-  myPick?: Pick;
-  standings: ReturnType<typeof buildStandings>;
-  allPicks: Pick[];
-  roster: Player[];
-  weekGames: Game[];
-  revealed: boolean;
-  chart: ReturnType<typeof buildChart>;
-  onPick: () => void;
-}) {
-  const pickGame = myPick ? [...weekGames, ...allGames].find((game) => game.id === myPick.gameId) : undefined;
-  const selectedTeam = myPick ? getTeam(myPick.selectedTeamId) : undefined;
-  const opponent = myPick ? getTeam(myPick.opponentTeamId) : undefined;
+function MagicLinkPanel({ loading, onSignedIn }: { loading: boolean; onSignedIn: () => Promise<void> }) {
+  const [email, setEmail] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+
+  async function sendMagicLink() {
+    setSending(true);
+    setStatus(null);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          emailRedirectTo: `${window.location.origin}/auth/callback`,
+          data: { display_name: displayName || email.split("@")[0] },
+          shouldCreateUser: true,
+        },
+      });
+      if (error) throw error;
+      setStatus("Check your email. Open the magic link on this same phone or browser.");
+      await onSignedIn();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not send magic link.");
+    } finally {
+      setSending(false);
+    }
+  }
 
   return (
-    <div className="space-y-8">
-      <section className="grid gap-5 lg:grid-cols-[1.2fr_0.8fr]">
-        <div className="relative overflow-hidden rounded border border-white/10 bg-[linear-gradient(135deg,#141a24,#0b1018_55%,#161b1e)] p-5 shadow-2xl sm:p-8">
-          <div className="absolute inset-y-0 right-0 w-1/2 opacity-20" style={{ background: "linear-gradient(135deg, #e31837, #0057b8)" }} />
-          <div className="relative">
-            <p className="text-sm font-black uppercase tracking-[0.3em] text-red-400">Week {currentWeek}</p>
-            <h2 className="mt-3 max-w-3xl text-4xl font-black uppercase leading-tight sm:text-6xl">NFL Underdog Pick&apos;em</h2>
-            <div className="mt-8 flex flex-col gap-4 sm:flex-row">
-              {myPick && selectedTeam && opponent && pickGame ? (
-                <>
-                  <TeamLockup teamId={selectedTeam.id} size="lg" />
-                  <div>
-                    <p className="text-sm uppercase text-slate-400">Your pick</p>
-                    <p className="text-3xl font-black">{selectedTeam.fullName} {formatSpread(myPick.submittedSpread)}</p>
-                    <p className="mt-1 text-slate-300">vs {opponent.fullName} · {formatKickoff(pickGame.kickoffAt)}</p>
-                    <p className="mt-4 text-lg font-bold text-emerald-300">Potential: {formatPoints(potentialPoints(myPick.submittedSpread))}</p>
-                  </div>
-                </>
-              ) : (
-                <div>
-                  <p className="text-lg text-slate-300">No Week {currentWeek} pick submitted.</p>
-                  <button onClick={onPick} className="mt-5 h-12 rounded bg-red-600 px-5 font-black uppercase text-white">
-                    Make Pick
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
+    <section className="mb-6 rounded border border-white/10 bg-white/[0.04] p-5">
+      <div className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr] lg:items-end">
+        <div>
+          <p className="text-sm font-black uppercase tracking-[0.25em] text-red-400">Join League</p>
+          <h2 className="mt-2 text-3xl font-black uppercase">Sign In With Email</h2>
+          <p className="mt-2 text-sm text-slate-300">
+            Enter your email, tap the magic link, and you&apos;ll stay signed in on this device.
+          </p>
         </div>
-        <Leaderboard standings={standings.slice(0, 4)} />
-      </section>
-
-      <section className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
-        <WeeklyPicks allPicks={allPicks} roster={roster} revealed={revealed} />
-        <SeasonChart chart={chart} roster={roster} />
-      </section>
-    </div>
+        <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
+          <input
+            className="h-12 min-w-0 rounded border border-white/10 bg-black/30 px-4 outline-none"
+            value={displayName}
+            onChange={(event) => setDisplayName(event.target.value)}
+            placeholder="Display name"
+            aria-label="Display name"
+            disabled={loading || sending}
+          />
+          <input
+            className="h-12 min-w-0 rounded border border-white/10 bg-black/30 px-4 outline-none"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="you@example.com"
+            aria-label="Email"
+            type="email"
+            disabled={loading || sending}
+          />
+          <button
+            className="h-12 rounded bg-red-600 px-5 font-black uppercase text-white disabled:cursor-not-allowed disabled:bg-slate-700"
+            onClick={sendMagicLink}
+            disabled={loading || sending || !email.includes("@")}
+          >
+            {sending ? "Sending" : "Send Link"}
+          </button>
+        </div>
+      </div>
+      {status && <p className="mt-4 rounded border border-white/10 bg-black/25 p-3 text-sm text-slate-200">{status}</p>}
+    </section>
   );
 }
 
@@ -311,7 +400,7 @@ function PickScreen({
       <PageIntro eyebrow={`2026 Week ${currentWeek}`} title="Choose One Underdog" detail="All games are listed chronologically. Games lock automatically at kickoff." />
       {myPick && (
         <div className="rounded border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
-          Change Pick is open until kickoff. Your previous spread snapshot will be discarded and the new team&apos;s current DraftKings spread will be locked when you confirm.
+          Change Pick is open until the game you already picked kicks off. Your previous spread snapshot will be discarded and the new team&apos;s current DraftKings spread will be locked when you confirm.
         </div>
       )}
       <div className={`rounded border p-4 text-sm ${oddsMode === "live" ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100" : "border-amber-400/30 bg-amber-400/10 text-amber-100"}`}>
@@ -475,60 +564,61 @@ function HistoryScreen({ allPicks, roster, chart }: { allPicks: Pick[]; roster: 
   );
 }
 
-function RulesScreen() {
-  return (
-    <div className="space-y-6">
-      <PageIntro eyebrow="Rules" title="Outright Underdogs Only" detail="Each player chooses one DraftKings underdog per NFL week." />
-      <div className="grid gap-4 md:grid-cols-2">
-        <Metric label="Underdog Wins Under +7" value="Spread + 3" detail="+3.5 winner scores 6.5" />
-        <Metric label="Underdog Wins +7 or More" value="Spread + 5" detail="+7 winner scores 12" />
-        <Metric label="Loss" value="0 points" detail="Covering the spread does not count" />
-        <Metric label="Odds Movement" value="Snapshot Rules" detail="The submitted DraftKings spread is used for scoring" />
-      </div>
-      <div className="rounded border border-white/10 bg-white/[0.04] p-5 text-slate-300">
-        Canceled or postponed games are void unless an admin resolves them differently. Tied NFL games are recorded as pushes and score 0 points. Highest cumulative score at the end of the season wins.
-      </div>
-    </div>
-  );
-}
-
 function ProfileScreen({
   roster,
   currentUserId,
   setCurrentUserId,
+  authEmail,
+  dataMode,
 }: {
   roster: Player[];
   currentUserId: string;
   setCurrentUserId: (id: string) => void;
+  authEmail: string | null;
+  dataMode: "demo" | "supabase";
 }) {
   const currentPlayer = roster.find((player) => player.id === currentUserId) ?? roster[0];
+  async function signOut() {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    window.location.reload();
+  }
+
   return (
     <div className="max-w-2xl space-y-6">
-      <PageIntro eyebrow="Profile" title="Playing As" detail="For fast testing, switch between manually managed players without logging in." />
+      <PageIntro eyebrow="Profile" title={dataMode === "supabase" ? "Account" : "Playing As"} detail={dataMode === "supabase" ? "Your phone stays signed in after magic-link login." : "For fast testing, switch between manually managed players without logging in."} />
       <div className="rounded border border-white/10 bg-white/[0.04] p-5">
         <div className="flex items-center gap-4">
           <Avatar value={currentPlayer.avatarUrl ?? currentPlayer.displayName[0]} large />
           <div>
             <p className="text-2xl font-black">{currentPlayer.displayName}</p>
-            <p className="text-slate-400">{currentPlayer.role === "admin" ? "Admin" : "Player"} · no-login test mode</p>
+            <p className="text-slate-400">
+              {currentPlayer.role === "admin" ? "Admin" : "Player"}
+              {authEmail ? ` · ${authEmail}` : " · no-login test mode"}
+            </p>
           </div>
         </div>
         <div className="mt-6 grid gap-3">
-          <select
-            className="h-12 rounded border border-white/10 bg-black/30 px-4 outline-none"
-            value={currentPlayer.id}
-            onChange={(event) => setCurrentUserId(event.target.value)}
-            aria-label="Current player"
-          >
-            {roster.map((player) => (
-              <option key={player.id} value={player.id}>
-                {player.displayName}
-              </option>
-            ))}
-          </select>
+          {dataMode === "demo" && (
+            <select
+              className="h-12 rounded border border-white/10 bg-black/30 px-4 outline-none"
+              value={currentPlayer.id}
+              onChange={(event) => setCurrentUserId(event.target.value)}
+              aria-label="Current player"
+            >
+              {roster.map((player) => (
+                <option key={player.id} value={player.id}>
+                  {player.displayName}
+                </option>
+              ))}
+            </select>
+          )}
           <p className="rounded border border-white/10 bg-black/20 p-3 text-sm text-slate-300">
-            This is the quickest way to test the league with your friends&apos; names. For real remote submissions, use Supabase Auth or secure personal pick links so one person cannot submit as someone else.
+            {dataMode === "supabase"
+              ? "Magic-link auth is active. Picks are submitted under this signed-in account."
+              : "This is the quickest way to test the league with your friends' names. For real remote submissions, use Supabase Auth or secure personal pick links so one person cannot submit as someone else."}
           </p>
+          {authEmail && <button className="h-12 rounded border border-white/10 font-black" onClick={signOut}>Log Out</button>}
         </div>
       </div>
     </div>
@@ -684,29 +774,6 @@ function SeasonChart({ chart, roster }: { chart: ReturnType<typeof buildChart>; 
   );
 }
 
-function Leaderboard({ standings }: { standings: ReturnType<typeof buildStandings> }) {
-  return (
-    <section className="rounded border border-white/10 bg-white/[0.04] p-5">
-      <div className="flex items-center gap-2">
-        <Crown className="h-5 w-5 text-amber-300" />
-        <h3 className="text-2xl font-black">Current Standings</h3>
-      </div>
-      <div className="mt-4 space-y-3">
-        {standings.map((standing, index) => (
-          <div key={standing.player.id} className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <span className="w-6 text-center text-lg font-black text-slate-500">{index + 1}</span>
-              <Avatar value={standing.player.avatarUrl ?? standing.player.displayName[0]} />
-              <p className="font-bold">{standing.player.displayName}</p>
-            </div>
-            <p className="font-black text-emerald-300">{formatPoints(standing.totalPoints)}</p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
 function PickPill({ pick }: { pick: Pick }) {
   const team = getTeam(pick.selectedTeamId);
   const opponent = getTeam(pick.opponentTeamId);
@@ -751,17 +818,16 @@ function TeamLockup({ teamId, size = "md" }: { teamId: string; size?: "md" | "lg
   );
 }
 
-function NavButton({ tab, label, icon: Icon, active, onClick }: { tab: Tab; label: string; icon: typeof Home; active: boolean; onClick: () => void }) {
+function NavButton({ label, icon: Icon, active, onClick }: { tab: Tab; label: string; icon: LucideIcon; active: boolean; onClick: () => void }) {
   return (
     <button title={label} className={`flex h-10 items-center gap-2 rounded px-3 text-sm font-bold ${active ? "bg-white text-black" : "text-slate-300 hover:bg-white/10"}`} onClick={onClick}>
       <Icon className="h-4 w-4" />
       {label}
-      {tab === "home" && <ChevronRight className="h-4 w-4 opacity-40" />}
     </button>
   );
 }
 
-function MobileNavButton({ label, icon: Icon, active, onClick }: { label: string; icon: typeof Home; active: boolean; onClick: () => void }) {
+function MobileNavButton({ label, icon: Icon, active, onClick }: { label: string; icon: LucideIcon; active: boolean; onClick: () => void }) {
   return (
     <button title={label} className={`flex h-12 flex-col items-center justify-center rounded text-[10px] font-bold ${active ? "bg-white text-black" : "text-slate-400"}`} onClick={onClick}>
       <Icon className="h-4 w-4" />

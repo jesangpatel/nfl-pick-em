@@ -65,6 +65,17 @@ create table public.odds (
   source text not null default 'the-odds-api'
 );
 
+create table public.odds_refresh_log (
+  id uuid primary key default gen_random_uuid(),
+  fetched_at timestamptz not null default now(),
+  credits_used int not null default 1 check (credits_used > 0),
+  source text not null default 'the-odds-api',
+  requests_remaining text,
+  requests_used text,
+  status text not null default 'success',
+  notes text
+);
+
 create table public.picks (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
@@ -82,6 +93,7 @@ create table public.picks (
 );
 
 create index odds_game_fetched_idx on public.odds (game_id, fetched_at desc);
+create index odds_refresh_log_fetched_idx on public.odds_refresh_log (fetched_at desc);
 create index games_week_idx on public.games (season_id, week_number, kickoff_at);
 create index picks_week_idx on public.picks (season_id, week_number, user_id);
 
@@ -223,10 +235,16 @@ begin
     points_earned = 0,
     locked = false
   where public.picks.locked = false
+    and not exists (
+      select 1
+      from public.games existing_game
+      where existing_game.id = public.picks.game_id
+        and existing_game.kickoff_at <= now()
+    )
   returning * into v_pick;
 
   if v_pick.id is null then
-    raise exception 'Existing pick is locked';
+    raise exception 'Existing pick is locked because its game has started';
   end if;
 
   return v_pick;
@@ -275,6 +293,7 @@ alter table public.weeks enable row level security;
 alter table public.teams enable row level security;
 alter table public.games enable row level security;
 alter table public.odds enable row level security;
+alter table public.odds_refresh_log enable row level security;
 alter table public.picks enable row level security;
 
 create policy "profiles are visible to signed-in users" on public.profiles for select to authenticated using (true);
@@ -286,12 +305,14 @@ create policy "signed-in users read weeks" on public.weeks for select to authent
 create policy "signed-in users read teams" on public.teams for select to authenticated using (true);
 create policy "signed-in users read games" on public.games for select to authenticated using (true);
 create policy "signed-in users read odds" on public.odds for select to authenticated using (true);
+create policy "admins read odds refresh log" on public.odds_refresh_log for select to authenticated using (public.is_admin());
 
 create policy "admins manage seasons" on public.seasons for all to authenticated using (public.is_admin()) with check (public.is_admin());
 create policy "admins manage weeks" on public.weeks for all to authenticated using (public.is_admin()) with check (public.is_admin());
 create policy "admins manage teams" on public.teams for all to authenticated using (public.is_admin()) with check (public.is_admin());
 create policy "admins manage games" on public.games for all to authenticated using (public.is_admin()) with check (public.is_admin());
 create policy "admins manage odds" on public.odds for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "admins manage odds refresh log" on public.odds_refresh_log for all to authenticated using (public.is_admin()) with check (public.is_admin());
 
 create policy "users can see own or unlocked week picks"
 on public.picks
@@ -306,4 +327,3 @@ using (
 create policy "users insert own picks" on public.picks for insert to authenticated with check (user_id = auth.uid());
 create policy "users update own unlocked picks" on public.picks for update to authenticated using (user_id = auth.uid() and locked = false) with check (user_id = auth.uid());
 create policy "admins manage picks" on public.picks for all to authenticated using (public.is_admin()) with check (public.is_admin());
-

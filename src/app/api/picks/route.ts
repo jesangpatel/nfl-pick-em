@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, createServiceClient } from "@/lib/supabase/server";
 
 const submitPickSchema = z.object({
   season: z.number().int(),
   week: z.number().int().min(1).max(22),
   gameId: z.string().uuid(),
-  selectedTeamId: z.string().uuid(),
+  selectedTeamId: z.string(),
 });
 
 export async function POST(request: Request) {
@@ -24,11 +24,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Please log in before submitting a pick." }, { status: 401 });
   }
 
+  const selectedTeamId = await resolveSelectedTeamId(parsed.data.selectedTeamId);
   const { data, error } = await supabase.rpc("submit_weekly_pick", {
     p_season: parsed.data.season,
     p_week_number: parsed.data.week,
     p_game_id: parsed.data.gameId,
-    p_selected_team_id: parsed.data.selectedTeamId,
+    p_selected_team_id: selectedTeamId,
   });
 
   if (error) {
@@ -38,3 +39,21 @@ export async function POST(request: Request) {
   return NextResponse.json({ pick: data });
 }
 
+async function resolveSelectedTeamId(selectedTeamId: string) {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(selectedTeamId)) {
+    return selectedTeamId;
+  }
+
+  const service = createServiceClient();
+  const { data, error } = await service
+    .from("teams")
+    .select("id")
+    .eq("abbreviation", selectedTeamId.toUpperCase())
+    .single();
+
+  if (error || !data) {
+    throw new Error("Selected team was not found.");
+  }
+
+  return data.id;
+}
