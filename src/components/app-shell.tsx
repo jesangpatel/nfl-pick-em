@@ -48,17 +48,25 @@ const weekOneWindow = {
 export function AppShell() {
   const supabaseConfigured = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
   const [activeTab, setActiveTab] = useState<Tab>("pick");
-  const [roster, setRoster] = useState<Player[]>(demoPlayers);
-  const [currentUserId, setCurrentUserId] = useState(demoPlayers[0].id);
-  const [allPicks, setAllPicks] = useState<Pick[]>([...historicalPicks, seededCurrentPick]);
-  const [weekGames, setWeekGames] = useState<Game[]>(games);
+  const [roster, setRoster] = useState<Player[]>(supabaseConfigured ? [] : demoPlayers);
+  const [currentUserId, setCurrentUserId] = useState(supabaseConfigured ? "" : demoPlayers[0].id);
+  const [allPicks, setAllPicks] = useState<Pick[]>(supabaseConfigured ? [] : [...historicalPicks, seededCurrentPick]);
+  const [weekGames, setWeekGames] = useState<Game[]>(supabaseConfigured ? [] : games);
   const [pendingGame, setPendingGame] = useState<Game | null>(null);
   const [oddsMode, setOddsMode] = useState<"demo" | "live" | "error">("demo");
   const [oddsStatus, setOddsStatus] = useState("Showing the real 2026 Week 1 NFL schedule with demo DraftKings-style lines until ODDS_API_KEY is configured.");
   const [authEmail, setAuthEmail] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(supabaseConfigured);
+  const [leagueLoading, setLeagueLoading] = useState(false);
+  const [leagueError, setLeagueError] = useState<string | null>(null);
   const [dataMode, setDataMode] = useState<"demo" | "supabase">("demo");
-  const currentUser = roster.find((player) => player.id === currentUserId) ?? roster[0];
+  const signedOutUser: Player = {
+    id: "signed-out",
+    displayName: authEmail?.split("@")[0] ?? "Sign In",
+    avatarUrl: "SI",
+    role: "player",
+  };
+  const currentUser = roster.find((player) => player.id === currentUserId) ?? roster[0] ?? signedOutUser;
   const isAdmin = dataMode === "demo" ? currentUser.role === "admin" : currentUser.role === "admin" && Boolean(authEmail);
   const visibleNavItems = navItems.filter((item) => item.tab !== "admin" || isAdmin);
   const activeView = activeTab === "admin" && !isAdmin ? "pick" : activeTab;
@@ -66,6 +74,8 @@ export function AppShell() {
   const revealed = Boolean(myCurrentPick);
   const standings = useMemo(() => buildStandings(roster, allPicks), [roster, allPicks]);
   const chart = useMemo(() => buildChart(roster, allPicks, currentWeek), [roster, allPicks]);
+  const showSignIn = supabaseConfigured && !authLoading && !authEmail;
+  const showLeague = !supabaseConfigured || Boolean(authEmail);
 
   useEffect(() => {
     if (!supabaseConfigured) return;
@@ -81,8 +91,9 @@ export function AppShell() {
 
       setAuthEmail(session?.user.email ?? null);
       if (session?.user) {
-        await fetch("/api/profile", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
-        await loadLeagueData();
+        await syncProfileAndLeague();
+      } else {
+        clearProductionData();
       }
       setAuthLoading(false);
     }
@@ -94,29 +105,77 @@ export function AppShell() {
     } = supabase.auth.onAuthStateChange(async (_event, session) => {
       setAuthEmail(session?.user.email ?? null);
       if (session?.user) {
-        await fetch("/api/profile", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
-        await loadLeagueData();
+        await syncProfileAndLeague();
+      } else {
+        clearProductionData();
       }
+      setAuthLoading(false);
     });
 
     return () => {
       mounted = false;
       subscription.unsubscribe();
     };
+    // The auth listener should be recreated only when Supabase configuration changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabaseConfigured]);
 
-  async function loadLeagueData() {
-    const response = await fetch("/api/league", { cache: "no-store" });
-    if (!response.ok) return;
-    const payload = await response.json();
-    if (Array.isArray(payload.players) && payload.players.length > 0) setRoster(payload.players);
-    if (Array.isArray(payload.games) && payload.games.length > 0) {
-      setWeekGames(payload.games.sort(sortByKickoff));
-      setOddsMode("live");
+  async function syncProfileAndLeague() {
+    setLeagueError(null);
+    try {
+      const response = await fetch("/api/profile", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? "Unable to update profile.");
+      await loadLeagueData();
+    } catch (error) {
+      setLeagueError(error instanceof Error ? error.message : "Unable to update profile.");
     }
-    if (Array.isArray(payload.picks)) setAllPicks(payload.picks);
-    if (payload.currentUserId) setCurrentUserId(payload.currentUserId);
+  }
+
+  async function loadLeagueData() {
+    setLeagueLoading(true);
+    setLeagueError(null);
+    try {
+      const response = await fetch("/api/league", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? "Unable to load league data.");
+      setRoster(Array.isArray(payload.players) ? payload.players : []);
+      setWeekGames(Array.isArray(payload.games) ? payload.games.sort(sortByKickoff) : []);
+      setAllPicks(Array.isArray(payload.picks) ? payload.picks : []);
+      if (payload.currentUserId) setCurrentUserId(payload.currentUserId);
+      setDataMode("supabase");
+
+      const liveOddsGames = Number(payload.oddsSummary?.liveOddsGames ?? 0);
+      const totalGames = Number(payload.oddsSummary?.totalGames ?? 0);
+      if (totalGames > 0 && liveOddsGames === totalGames) {
+        setOddsMode("live");
+        setOddsStatus(`Live DraftKings spreads loaded for all ${totalGames} games. Last update: ${payload.oddsSummary?.latestFetchedAt ?? "unknown"}.`);
+      } else {
+        setOddsMode("demo");
+        setOddsStatus(`Waiting for live DraftKings spreads. ${liveOddsGames} of ${totalGames} games currently have live Odds API rows.`);
+      }
+    } catch (error) {
+      setLeagueError(error instanceof Error ? error.message : "Unable to load league data.");
+      setOddsMode("error");
+    } finally {
+      setLeagueLoading(false);
+    }
+  }
+
+  function clearProductionData() {
+    if (!supabaseConfigured) return;
+    setRoster([]);
+    setCurrentUserId("");
+    setAllPicks([]);
+    setWeekGames([]);
     setDataMode("supabase");
+    setLeagueError(null);
+    setOddsMode("demo");
+    setOddsStatus("Sign in to load live league data.");
   }
 
   async function confirmPick(game: Game) {
@@ -171,13 +230,18 @@ export function AppShell() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(weekOneWindow),
       });
-      const payload = await response.json();
+      const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? "Odds refresh failed");
+      const fetchedGames = Array.isArray(payload.games) ? payload.games.length : 0;
       if (Array.isArray(payload.games) && payload.games.length > 0) {
         setWeekGames(payload.games.sort(sortByKickoff));
         setOddsMode("live");
       }
-      setOddsStatus(`Fetched ${payload.games.length} DraftKings games. Remaining quota: ${payload.requestsRemaining ?? "unknown"}.`);
+      await loadLeagueData();
+      const persistedMessage = payload.persisted
+        ? `Persisted ${payload.persisted.oddsInserted} odds rows across ${payload.persisted.gamesUpserted} games.`
+        : "Odds were fetched but not persisted because Supabase service credentials are missing.";
+      setOddsStatus(`Fetched ${fetchedGames} DraftKings games. ${persistedMessage} Remaining quota: ${payload.requestsRemaining ?? "unknown"}.`);
     } catch (error) {
       setOddsMode("error");
       setOddsStatus(error instanceof Error ? error.message : "Odds refresh failed. Manual entry remains available.");
@@ -237,9 +301,10 @@ export function AppShell() {
             </div>
           </button>
           <div className="hidden items-center gap-2 md:flex">
-            {visibleNavItems.map((item) => (
-              <NavButton key={item.tab} {...item} active={activeView === item.tab} onClick={() => setActiveTab(item.tab)} />
-            ))}
+            {showLeague &&
+              visibleNavItems.map((item) => (
+                <NavButton key={item.tab} {...item} active={activeView === item.tab} onClick={() => setActiveTab(item.tab)} />
+              ))}
           </div>
           <button
             className="flex h-11 items-center gap-2 rounded border border-white/10 bg-white/5 px-3 text-sm font-bold"
@@ -252,12 +317,22 @@ export function AppShell() {
       </div>
 
       <main className="mx-auto max-w-7xl px-4 pb-28 pt-24 sm:px-6 md:pb-10">
-        {supabaseConfigured && !authEmail && (
-          <MagicLinkPanel loading={authLoading} onSignedIn={async () => loadLeagueData()} />
+        {supabaseConfigured && authLoading && (
+          <div className="mb-5 rounded border border-white/10 bg-white/[0.04] p-5 text-sm font-bold text-slate-200">
+            Checking your saved sign-in...
+          </div>
+        )}
+        {showSignIn && (
+          <MagicLinkPanel loading={authLoading} />
         )}
         {supabaseConfigured && authEmail && (
           <div className="mb-5 rounded border border-emerald-400/25 bg-emerald-400/10 p-3 text-sm font-bold text-emerald-100">
             Signed in as {authEmail}. This device will stay signed in unless you log out.
+          </div>
+        )}
+        {leagueError && (
+          <div className="mb-5 rounded border border-red-400/30 bg-red-500/10 p-3 text-sm font-bold text-red-100">
+            {leagueError}
           </div>
         )}
         {!supabaseConfigured && (
@@ -265,53 +340,63 @@ export function AppShell() {
             Local demo mode. Add Supabase environment variables in Vercel to enable friend magic links and shared picks.
           </div>
         )}
-        {activeView === "pick" && (
-          <PickScreen
-            myPick={myCurrentPick}
-            weekGames={weekGames}
-            oddsMode={oddsMode}
-            onSelect={setPendingGame}
-          />
+        {showLeague && leagueLoading && roster.length === 0 && (
+          <div className="rounded border border-white/10 bg-white/[0.04] p-5 text-sm font-bold text-slate-200">
+            Loading league...
+          </div>
         )}
-        {activeView === "week" && <WeekScreen allPicks={allPicks} roster={roster} revealed={revealed} />}
-        {activeView === "standings" && <StandingsScreen standings={standings} />}
-        {activeView === "history" && <HistoryScreen allPicks={allPicks} roster={roster} chart={chart} />}
-        {activeView === "profile" && (
-          <ProfileScreen
-            roster={roster}
-            currentUserId={currentUser.id}
-            setCurrentUserId={setCurrentUserId}
-            authEmail={authEmail}
-            dataMode={dataMode}
-          />
-        )}
-        {activeView === "admin" && (
-          <AdminScreen
-            oddsStatus={oddsStatus}
-            oddsMode={oddsMode}
-            roster={roster}
-            weekGames={weekGames}
-            addManualPlayer={addManualPlayer}
-            refreshOdds={refreshOdds}
-            updateGameSpread={updateGameSpread}
-          />
+        {showLeague && (!leagueLoading || roster.length > 0 || !supabaseConfigured) && (
+          <>
+            {activeView === "pick" && (
+              <PickScreen
+                myPick={myCurrentPick}
+                weekGames={weekGames}
+                oddsMode={oddsMode}
+                onSelect={setPendingGame}
+              />
+            )}
+            {activeView === "week" && <WeekScreen allPicks={allPicks} roster={roster} revealed={revealed} />}
+            {activeView === "standings" && <StandingsScreen standings={standings} />}
+            {activeView === "history" && <HistoryScreen allPicks={allPicks} roster={roster} chart={chart} />}
+            {activeView === "profile" && (
+              <ProfileScreen
+                roster={roster}
+                currentUserId={currentUser.id}
+                setCurrentUserId={setCurrentUserId}
+                authEmail={authEmail}
+                dataMode={dataMode}
+              />
+            )}
+            {activeView === "admin" && (
+              <AdminScreen
+                oddsStatus={oddsStatus}
+                oddsMode={oddsMode}
+                dataMode={dataMode}
+                roster={roster}
+                weekGames={weekGames}
+                addManualPlayer={addManualPlayer}
+                refreshOdds={refreshOdds}
+                updateGameSpread={updateGameSpread}
+              />
+            )}
+          </>
         )}
       </main>
 
-      <div className="fixed inset-x-0 bottom-0 z-20 border-t border-white/10 bg-[#080c12]/95 px-2 py-2 backdrop-blur md:hidden">
+      {showLeague && <div className="fixed inset-x-0 bottom-0 z-20 border-t border-white/10 bg-[#080c12]/95 px-2 py-2 backdrop-blur md:hidden">
         <div className="mx-auto grid max-w-2xl gap-1" style={{ gridTemplateColumns: `repeat(${visibleNavItems.length}, minmax(0, 1fr))` }}>
           {visibleNavItems.map((item) => (
             <MobileNavButton key={item.tab} {...item} active={activeView === item.tab} onClick={() => setActiveTab(item.tab)} />
           ))}
         </div>
-      </div>
+      </div>}
 
       {pendingGame && <ConfirmPick game={pendingGame} onBack={() => setPendingGame(null)} onConfirm={() => confirmPick(pendingGame)} />}
     </div>
   );
 }
 
-function MagicLinkPanel({ loading, onSignedIn }: { loading: boolean; onSignedIn: () => Promise<void> }) {
+function MagicLinkPanel({ loading }: { loading: boolean }) {
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [status, setStatus] = useState<string | null>(null);
@@ -332,7 +417,6 @@ function MagicLinkPanel({ loading, onSignedIn }: { loading: boolean; onSignedIn:
       });
       if (error) throw error;
       setStatus("Check your email. Open the magic link on this same phone or browser.");
-      await onSignedIn();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not send magic link.");
     } finally {
@@ -628,6 +712,7 @@ function ProfileScreen({
 function AdminScreen({
   oddsStatus,
   oddsMode,
+  dataMode,
   roster,
   weekGames,
   addManualPlayer,
@@ -636,6 +721,7 @@ function AdminScreen({
 }: {
   oddsStatus: string;
   oddsMode: "demo" | "live" | "error";
+  dataMode: "demo" | "supabase";
   roster: Player[];
   weekGames: Game[];
   addManualPlayer: (displayName: string) => void;
@@ -672,20 +758,29 @@ function AdminScreen({
           </p>
         </div>
         <div className="rounded border border-white/10 bg-white/[0.04] p-5">
-          <p className="text-sm font-bold uppercase tracking-[0.2em] text-slate-500">Manual Players</p>
-          <div className="mt-4 flex gap-2">
-            <input
-              className="h-11 min-w-0 flex-1 rounded border border-white/10 bg-black/30 px-3 outline-none"
-              value={newPlayerName}
-              onChange={(event) => setNewPlayerName(event.target.value)}
-              placeholder="Friend name"
-              aria-label="Friend name"
-            />
-            <button className="flex h-11 items-center gap-2 rounded bg-white px-4 font-black text-black" onClick={submitPlayer}>
-              <UserPlus className="h-4 w-4" />
-              Add
-            </button>
-          </div>
+          <p className="text-sm font-bold uppercase tracking-[0.2em] text-slate-500">
+            {dataMode === "demo" ? "Manual Players" : "League Players"}
+          </p>
+          {dataMode === "demo" && (
+            <div className="mt-4 flex gap-2">
+              <input
+                className="h-11 min-w-0 flex-1 rounded border border-white/10 bg-black/30 px-3 outline-none"
+                value={newPlayerName}
+                onChange={(event) => setNewPlayerName(event.target.value)}
+                placeholder="Friend name"
+                aria-label="Friend name"
+              />
+              <button className="flex h-11 items-center gap-2 rounded bg-white px-4 font-black text-black" onClick={submitPlayer}>
+                <UserPlus className="h-4 w-4" />
+                Add
+              </button>
+            </div>
+          )}
+          {dataMode === "supabase" && (
+            <p className="mt-4 rounded border border-white/10 bg-black/20 p-3 text-sm text-slate-300">
+              Production players appear here only after they sign in with a magic link.
+            </p>
+          )}
           <div className="mt-4 flex flex-wrap gap-2">
             {roster.map((player) => (
               <span key={player.id} className="rounded bg-white/10 px-3 py-2 text-sm font-bold">
@@ -695,7 +790,7 @@ function AdminScreen({
           </div>
         </div>
       </div>
-      <div className="grid gap-4">
+      {dataMode === "demo" && <div className="grid gap-4">
         <div className="rounded border border-white/10 bg-white/[0.04] p-5">
           <p className="text-sm font-bold uppercase tracking-[0.2em] text-slate-500">Manual DraftKings Spread Override</p>
           <p className="mt-2 text-sm text-slate-400">
@@ -722,7 +817,7 @@ function AdminScreen({
             ))}
           </div>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

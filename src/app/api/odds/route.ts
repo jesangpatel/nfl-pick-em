@@ -3,19 +3,21 @@ import { currentWeek, season } from "@/lib/demo-data";
 import { budgetWindowStart, ODDS_MONTHLY_BUDGET } from "@/lib/odds/cadence";
 import { persistDraftKingsOdds } from "@/lib/odds/persist";
 import { TheOddsApiDraftKingsProvider } from "@/lib/odds/the-odds-api";
-import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { createClient, createServiceClient, ensureUserProfile } from "@/lib/supabase/server";
 
 export async function POST(request: Request) {
   try {
+    const service = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY ? createServiceClient() : null;
+
     if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-      const isAdmin = await currentUserIsAdmin();
+      if (!service) throw new Error("Supabase service credentials are not configured.");
+      const isAdmin = await currentUserIsAdmin(service);
       if (!isAdmin) {
         return NextResponse.json({ error: "Admin access required." }, { status: 403 });
       }
     }
 
     const body = await request.json().catch(() => ({}));
-    const service = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY ? createServiceClient() : null;
     if (service) {
       const { data: refreshes, error } = await service
         .from("odds_refresh_log")
@@ -46,15 +48,16 @@ export async function POST(request: Request) {
         seasonYear: Number(body.season ?? season),
         weekNumber: Number(body.week ?? currentWeek),
       });
-      await service.from("odds_refresh_log").insert({
+      const { error: logError } = await service.from("odds_refresh_log").insert({
         fetched_at: result.fetchedAt,
         credits_used: 1,
         source: result.source,
         requests_remaining: result.requestsRemaining,
         requests_used: result.requestsUsed,
         status: "success",
-        notes: "Manual admin refresh.",
+        notes: `Manual admin refresh. Persisted ${persisted.oddsInserted} odds rows across ${persisted.gamesUpserted} games.`,
       });
+      if (logError) throw logError;
     }
 
     return NextResponse.json({ ...result, persisted });
@@ -70,14 +73,13 @@ export async function GET() {
   return POST(new Request("http://localhost/api/odds", { method: "POST" }));
 }
 
-async function currentUserIsAdmin() {
+async function currentUserIsAdmin(service: ReturnType<typeof createServiceClient>) {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return false;
+  if (!user?.email) return false;
 
-  const service = createServiceClient();
-  const { data } = await service.from("profiles").select("role").eq("id", user.id).single();
-  return data?.role === "admin";
+  const profile = await ensureUserProfile({ service, user });
+  return profile.role === "admin";
 }

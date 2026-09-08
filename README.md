@@ -223,10 +223,12 @@ For Sunday, September 6, 2026, no Week 1 games have kicked off yet. The first li
 
 1. Create a Supabase project.
 2. Run `supabase/migrations/001_initial_schema.sql`.
-3. Run `supabase/seed.sql` for seasons, teams, demo games, and demo odds.
-4. Invite real players through Supabase Auth.
-5. Insert matching rows in `profiles`, setting Jesang or other league managers to `role = 'admin'`.
+3. Run `supabase/migrations/002_odds_refresh_budget.sql`, `003_lock_pick_changes_after_selected_game_starts.sql`, and `004_promote_jesang_admin.sql`.
+4. Run `supabase/seed.sql` for seasons, teams, starter games, and local fallback odds.
+5. Let real players join through the site's magic-link flow.
 6. From the app's Admin section, run Refresh to replace starter odds with current DraftKings odds from The Odds API.
+
+Production roster data comes only from `profiles`, which are created when real users sign in. The local demo names are used only when Supabase is not configured.
 
 Production picks should be submitted through `public.submit_weekly_pick`. That RPC:
 
