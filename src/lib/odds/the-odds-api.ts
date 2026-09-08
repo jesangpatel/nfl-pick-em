@@ -49,7 +49,7 @@ export class TheOddsApiDraftKingsProvider implements OddsProvider {
     if (params.commenceTimeFrom) url.searchParams.set("commenceTimeFrom", params.commenceTimeFrom);
     if (params.commenceTimeTo) url.searchParams.set("commenceTimeTo", params.commenceTimeTo);
 
-    const response = await fetch(url, { next: { revalidate: 60 } });
+    const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) {
       const detail = await response.text();
       throw new Error(`The Odds API request failed (${response.status}): ${detail}`);
@@ -93,4 +93,3 @@ function toGame(event: OddsApiEvent): Game | null {
     lastOddsUpdate: spreadMarket.last_update ?? draftKings.last_update,
   };
 }
-

@@ -86,6 +86,7 @@ export async function persistDraftKingsOdds({
       away_spread: game.awaySpread,
       fetched_at: game.lastOddsUpdate ?? new Date().toISOString(),
       source: "the-odds-api",
+      external_event_id: game.externalGameId,
     });
     if (oddsError) throw oddsError;
 

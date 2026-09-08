@@ -1,26 +1,36 @@
 import { NextResponse } from "next/server";
 import { currentWeek, season } from "@/lib/demo-data";
-import { createClient, createServiceClient, ensureUserProfile } from "@/lib/supabase/server";
+import { budgetWindowStart } from "@/lib/odds/cadence";
+import { createServiceClient } from "@/lib/supabase/server";
+
+type HydratedGame = {
+  id: string;
+  externalGameId: string;
+  season: number;
+  week: number;
+  homeTeamId: string;
+  awayTeamId: string;
+  kickoffAt: string;
+  status: string;
+  homeScore?: number;
+  awayScore?: number;
+  homeSpread?: number;
+  awaySpread?: number;
+  sportsbook: "draftkings";
+  lastOddsUpdate?: string;
+  venue?: string;
+  broadcast?: string;
+};
 
 export async function GET() {
   try {
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Not authenticated." }, { status: 401 });
-    }
-
     const service = createServiceClient();
-    await ensureUserProfile({ service, user });
     const { data: activeSeason, error: seasonError } = await service
       .from("seasons")
       .select("id, year")
       .eq("active", true)
       .single();
-    if (seasonError) return NextResponse.json({ error: seasonError.message }, { status: 500 });
+    if (seasonError) throw seasonError;
 
     const { data: openWeek } = await service
       .from("weeks")
@@ -32,9 +42,18 @@ export async function GET() {
       .maybeSingle();
 
     const weekNumber = openWeek?.week_number ?? currentWeek;
+    const windowStart = budgetWindowStart();
 
-    const [{ data: profiles }, { data: teams }, { data: games }, { data: odds }, { data: userPick }] = await Promise.all([
-      service.from("profiles").select("id, display_name, avatar_url, role").order("display_name"),
+    const [
+      { data: profiles, error: profilesError },
+      { data: teams, error: teamsError },
+      { data: games, error: gamesError },
+      { data: odds, error: oddsError },
+      { data: picks, error: picksError },
+      { data: auditEvents, error: auditError },
+      { data: refreshes, error: refreshError },
+    ] = await Promise.all([
+      service.from("profiles").select("id, display_name, avatar_url, role, active, created_at").order("display_name"),
       service.from("teams").select("id, abbreviation"),
       service
         .from("games")
@@ -44,33 +63,38 @@ export async function GET() {
         .order("kickoff_at"),
       service
         .from("odds")
-        .select("game_id, home_spread, away_spread, fetched_at, source")
+        .select("id, game_id, home_spread, away_spread, fetched_at, source, external_event_id")
         .eq("source", "the-odds-api")
         .order("fetched_at", { ascending: false }),
       service
         .from("picks")
-        .select("id")
+        .select("id, user_id, week_number, game_id, selected_team_id, opponent_team_id, submitted_spread, submitted_at, result, points_earned, locked")
+        .eq("season_id", activeSeason.id),
+      service
+        .from("pick_audit_events")
+        .select("pick_id, participant_id, week_number, action_type, changed_at")
         .eq("season_id", activeSeason.id)
-        .eq("week_number", weekNumber)
-        .eq("user_id", user.id)
-        .maybeSingle(),
+        .order("changed_at", { ascending: true }),
+      service
+        .from("odds_refresh_log")
+        .select("fetched_at, credits_used, status, notes, requests_remaining, requests_used")
+        .gte("fetched_at", windowStart)
+        .order("fetched_at", { ascending: false }),
     ]);
 
+    if (profilesError) throw profilesError;
+    if (teamsError) throw teamsError;
+    if (gamesError) throw gamesError;
+    if (oddsError) throw oddsError;
+    if (picksError) throw picksError;
+    if (auditError) throw auditError;
+    if (refreshError) throw refreshError;
+
     const teamAbbrById = new Map((teams ?? []).map((team) => [team.id, team.abbreviation]));
-    const latestOddsByGame = new Map<string, { home_spread: number; away_spread: number; fetched_at: string; source: string }>();
+    const latestOddsByGame = new Map<string, { home_spread: number; away_spread: number; fetched_at: string }>();
     for (const oddsRow of odds ?? []) {
       if (!latestOddsByGame.has(oddsRow.game_id)) latestOddsByGame.set(oddsRow.game_id, oddsRow);
     }
-
-    const shouldRevealCurrentWeek = Boolean(userPick);
-    const picksQuery = service
-      .from("picks")
-      .select("id, user_id, week_number, game_id, selected_team_id, opponent_team_id, submitted_spread, submitted_at, result, points_earned, locked")
-      .eq("season_id", activeSeason.id);
-
-    const { data: picks } = shouldRevealCurrentWeek
-      ? await picksQuery
-      : await picksQuery.or(`week_number.neq.${weekNumber},user_id.eq.${user.id}`);
 
     const hydratedGames = (games ?? []).map((game) => {
       const latestOdds = latestOddsByGame.get(game.id);
@@ -87,16 +111,16 @@ export async function GET() {
         awayScore: game.away_score ?? undefined,
         homeSpread: latestOdds?.home_spread,
         awaySpread: latestOdds?.away_spread,
-        sportsbook: "draftkings",
+        sportsbook: "draftkings" as const,
         lastOddsUpdate: latestOdds?.fetched_at,
         venue: game.venue ?? undefined,
         broadcast: game.broadcast ?? undefined,
       };
     });
     const visibleGames = dedupeMatchups(hydratedGames);
+    const latestRefresh = refreshes?.[0] ?? null;
 
     return NextResponse.json({
-      currentUserId: user.id,
       season: activeSeason.year ?? season,
       currentWeek: weekNumber,
       oddsSummary: {
@@ -107,13 +131,29 @@ export async function GET() {
           .filter(Boolean)
           .sort()
           .at(-1) ?? null,
+        creditsUsedThisWindow: (refreshes ?? []).reduce((sum, row) => sum + Number(row.credits_used ?? 1), 0),
+        lastRefreshStatus: latestRefresh?.status ?? null,
+        lastRefreshAt: latestRefresh?.fetched_at ?? null,
+        lastRefreshNotes: latestRefresh?.notes ?? null,
+        requestsRemaining: latestRefresh?.requests_remaining ?? null,
+        requestsUsed: latestRefresh?.requests_used ?? null,
       },
       players: (profiles ?? []).map((profile) => ({
         id: profile.id,
         displayName: profile.display_name,
         avatarUrl: profile.avatar_url ?? undefined,
         role: profile.role,
+        active: profile.active ?? true,
       })),
+      activePlayers: (profiles ?? [])
+        .filter((profile) => profile.active ?? true)
+        .map((profile) => ({
+          id: profile.id,
+          displayName: profile.display_name,
+          avatarUrl: profile.avatar_url ?? undefined,
+          role: profile.role,
+          active: true,
+        })),
       games: visibleGames,
       picks: (picks ?? []).map((pick) => ({
         id: pick.id,
@@ -128,7 +168,11 @@ export async function GET() {
         result: pick.result,
         pointsEarned: Number(pick.points_earned),
         locked: pick.locked,
+        changed: (auditEvents ?? []).some(
+          (event) => event.pick_id === pick.id && event.action_type === "changed",
+        ),
       })),
+      auditEvents: auditEvents ?? [],
     });
   } catch (error) {
     return NextResponse.json(
@@ -138,8 +182,8 @@ export async function GET() {
   }
 }
 
-function dedupeMatchups<T extends { homeTeamId: string; awayTeamId: string; kickoffAt: string; lastOddsUpdate?: string }>(games: T[]) {
-  const byMatchup = new Map<string, T>();
+function dedupeMatchups(games: HydratedGame[]) {
+  const byMatchup = new Map<string, HydratedGame>();
   for (const game of games) {
     const key = `${game.awayTeamId}-${game.homeTeamId}`;
     const existing = byMatchup.get(key);
@@ -151,7 +195,7 @@ function dedupeMatchups<T extends { homeTeamId: string; awayTeamId: string; kick
   return [...byMatchup.values()].sort((a, b) => new Date(a.kickoffAt).getTime() - new Date(b.kickoffAt).getTime());
 }
 
-function shouldPreferGame<T extends { homeSpread?: number; awaySpread?: number; lastOddsUpdate?: string }>(candidate: T, existing: T) {
+function shouldPreferGame(candidate: HydratedGame, existing: HydratedGame) {
   const candidateHasOdds = typeof candidate.homeSpread === "number" && typeof candidate.awaySpread === "number";
   const existingHasOdds = typeof existing.homeSpread === "number" && typeof existing.awaySpread === "number";
   if (candidateHasOdds !== existingHasOdds) return candidateHasOdds;

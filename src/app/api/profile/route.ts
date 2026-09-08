@@ -1,36 +1,41 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { createClient, ensureUserProfile } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/server";
 
 const profileSchema = z.object({
-  displayName: z.string().trim().min(1).max(40).optional(),
+  participantId: z.string().uuid(),
 });
 
 export async function POST(request: Request) {
   try {
     const parsed = profileSchema.safeParse(await request.json().catch(() => ({})));
     if (!parsed.success) {
-      return NextResponse.json({ error: "Invalid profile." }, { status: 400 });
+      return NextResponse.json({ error: "Choose a valid player." }, { status: 400 });
     }
 
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user?.email) {
-      return NextResponse.json({ error: "Not authenticated." }, { status: 401 });
+    const service = createServiceClient();
+    const { data, error } = await service
+      .from("profiles")
+      .select("id, display_name, avatar_url, role, active")
+      .eq("id", parsed.data.participantId)
+      .single();
+    if (error) throw error;
+    if (data.active === false) {
+      return NextResponse.json({ error: "That player is inactive." }, { status: 403 });
     }
 
-    const profile = await ensureUserProfile({
-      user,
-      displayName: parsed.data.displayName,
+    return NextResponse.json({
+      profile: {
+        id: data.id,
+        displayName: data.display_name,
+        avatarUrl: data.avatar_url ?? undefined,
+        role: data.role,
+        active: data.active,
+      },
     });
-
-    return NextResponse.json({ profile });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unable to update profile." },
+      { error: error instanceof Error ? error.message : "Unable to load profile." },
       { status: 500 },
     );
   }

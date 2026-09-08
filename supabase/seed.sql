@@ -82,10 +82,10 @@ insert into public.odds (game_id, sportsbook, home_spread, away_spread, fetched_
 ('10000000-0000-0000-0000-000000000015','draftkings',4.5,-4.5,'2026-09-06T20:00:00Z','demo'),
 ('10000000-0000-0000-0000-000000000016','draftkings',-8.5,8.5,'2026-09-06T20:00:00Z','demo');
 
--- Create players through Supabase Auth, then insert matching profile rows:
--- insert into public.profiles (id, display_name, avatar_url, role)
--- values ('<auth-user-id>', 'Jesang', 'JP', 'admin');
+-- Add real players from the app's Admin screen after running migration 005.
+-- The rows in public.profiles are now manually managed pool participants,
+-- not Supabase Auth users.
 --
 -- Demo picks are shown in the local frontend with non-authenticated fixture data.
--- Production picks should be created through public.submit_weekly_pick so the
+-- Production picks should be created through public.submit_participant_weekly_pick so the
 -- current DraftKings spread is snapshotted server-side.

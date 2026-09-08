@@ -10,7 +10,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@supabase/ssr": "^0.12.6",
     "@supabase/supabase-js": "^2.115.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",

@@ -3,18 +3,18 @@ import { currentWeek, season } from "@/lib/demo-data";
 import { budgetWindowStart, ODDS_MONTHLY_BUDGET } from "@/lib/odds/cadence";
 import { persistDraftKingsOdds } from "@/lib/odds/persist";
 import { TheOddsApiDraftKingsProvider } from "@/lib/odds/the-odds-api";
-import { createClient, createServiceClient, ensureUserProfile } from "@/lib/supabase/server";
+import { createServiceClient, requestHasAdminAccess } from "@/lib/supabase/server";
 
 export async function POST(request: Request) {
-  try {
-    const service = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY ? createServiceClient() : null;
+  const service = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY ? createServiceClient() : null;
 
-    if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-      if (!service) throw new Error("Supabase service credentials are not configured.");
-      const isAdmin = await currentUserIsAdmin(service);
-      if (!isAdmin) {
-        return NextResponse.json({ error: "Admin access required." }, { status: 403 });
-      }
+  try {
+    if (process.env.NEXT_PUBLIC_SUPABASE_URL && !service) {
+      throw new Error("Supabase service credentials are not configured.");
+    }
+
+    if (service && !requestHasAdminAccess(request)) {
+      return NextResponse.json({ error: "Admin access required." }, { status: 403 });
     }
 
     const body = await request.json().catch(() => ({}));
@@ -40,6 +40,11 @@ export async function POST(request: Request) {
       commenceTimeFrom: body.commenceTimeFrom,
       commenceTimeTo: body.commenceTimeTo,
     });
+
+    if (result.games.length === 0) {
+      throw new Error("No DraftKings NFL spread events were returned by The Odds API for this window.");
+    }
+
     let persisted = null;
     if (service) {
       persisted = await persistDraftKingsOdds({
@@ -62,24 +67,23 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ ...result, persisted });
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unable to refresh DraftKings odds." },
-      { status: 500 },
-    );
+    const message = sanitizeError(error);
+    if (service) {
+      await service.from("odds_refresh_log").insert({
+        credits_used: 1,
+        source: "the-odds-api",
+        status: "error",
+        notes: `Manual admin refresh failed: ${message}`,
+      });
+    }
+
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
-export async function GET() {
-  return POST(new Request("http://localhost/api/odds", { method: "POST" }));
-}
-
-async function currentUserIsAdmin(service: ReturnType<typeof createServiceClient>) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user?.email) return false;
-
-  const profile = await ensureUserProfile({ service, user });
-  return profile.role === "admin";
+function sanitizeError(error: unknown) {
+  const raw = error instanceof Error ? error.message : "Unable to refresh DraftKings odds.";
+  return [process.env.ODDS_API_KEY, process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.CRON_SECRET, process.env.ADMIN_SECRET]
+    .filter((secret): secret is string => Boolean(secret))
+    .reduce((message, secret) => message.replaceAll(String(secret), "[redacted]"), raw);
 }

@@ -20,6 +20,7 @@ export type Player = {
   displayName: string;
   avatarUrl?: string;
   role: ProfileRole;
+  active?: boolean;
 };
 
 export type Game = {
@@ -54,6 +55,15 @@ export type Pick = {
   result: PickResult;
   pointsEarned: number;
   locked: boolean;
+  changed?: boolean;
+};
+
+export type PickAuditEvent = {
+  pickId: string;
+  participantId: string;
+  week: number;
+  actionType: "created" | "changed" | "locked" | "admin-corrected";
+  changedAt: string;
 };
 
 export type Standing = {
@@ -72,4 +82,3 @@ export type ChartPoint = {
   week: number;
   [playerName: string]: number;
 };
-
