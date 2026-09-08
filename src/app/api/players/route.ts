@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createServiceClient, requestHasAdminAccess } from "@/lib/supabase/server";
+import { postgresUuidSchema } from "@/lib/validation";
 
 const createPlayerSchema = z.object({
   displayName: z.string().trim().min(1).max(40),
 });
 
 const updatePlayerSchema = z.object({
-  id: z.string().uuid(),
+  id: postgresUuidSchema,
   displayName: z.string().trim().min(1).max(40).optional(),
   active: z.boolean().optional(),
 });
@@ -18,6 +19,7 @@ export async function GET() {
     const { data, error } = await service
       .from("profiles")
       .select("id, display_name, avatar_url, role, active, created_at")
+      .eq("active", true)
       .order("display_name");
     if (error) throw error;
 

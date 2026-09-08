@@ -1,7 +1,7 @@
 import type { ChartPoint, Pick, Player, Standing } from "@/lib/types";
 
 export function buildStandings(players: Player[], picks: Pick[]): Standing[] {
-  const standings = players.map((player) => {
+  const standings = players.filter((player) => player.active !== false).map((player) => {
     const playerPicks = picks.filter((pick) => pick.userId === player.id && pick.result !== "void");
     const wins = playerPicks.filter((pick) => pick.result === "win").length;
     const losses = playerPicks.filter((pick) => pick.result === "loss").length;
@@ -38,4 +38,3 @@ export function buildChart(players: Player[], picks: Pick[], throughWeek: number
     return point;
   });
 }
-

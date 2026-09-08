@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createServiceClient } from "@/lib/supabase/server";
+import { postgresUuidSchema } from "@/lib/validation";
 
 const profileSchema = z.object({
-  participantId: z.string().uuid(),
+  participantId: postgresUuidSchema,
 });
 
 export async function POST(request: Request) {
@@ -18,10 +19,11 @@ export async function POST(request: Request) {
       .from("profiles")
       .select("id, display_name, avatar_url, role, active")
       .eq("id", parsed.data.participantId)
-      .single();
+      .eq("active", true)
+      .maybeSingle();
     if (error) throw error;
-    if (data.active === false) {
-      return NextResponse.json({ error: "That player is inactive." }, { status: 403 });
+    if (!data) {
+      return NextResponse.json({ error: "Choose an active player." }, { status: 404 });
     }
 
     return NextResponse.json({

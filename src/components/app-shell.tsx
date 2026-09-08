@@ -77,14 +77,15 @@ export function AppShell() {
   const [dataMode, setDataMode] = useState<"demo" | "supabase">(supabaseConfigured ? "supabase" : "demo");
   const [playerReady] = useState(true);
   const isAdmin = dataMode === "demo" ? currentUserId === demoPlayers[0].id : Boolean(adminKey);
-  const currentUser = roster.find((player) => player.id === currentUserId);
+  const visibleRoster = useMemo(() => roster.filter((player) => player.active !== false), [roster]);
+  const currentUser = visibleRoster.find((player) => player.id === currentUserId);
   const selectedPlayerIsActive = activePlayers.some((player) => player.id === currentUserId);
   const selectedPlayer = currentUser && selectedPlayerIsActive ? currentUser : null;
   const visibleNavItems = navItems.filter((item) => (item.tab === "admin" ? isAdmin : Boolean(selectedPlayer)));
   const activeView = activeTab === "admin" && !isAdmin ? "profile" : activeTab;
   const myCurrentPick = selectedPlayer ? allPicks.find((pick) => pick.userId === selectedPlayer.id && pick.week === currentWeek) : undefined;
   const revealed = Boolean(myCurrentPick);
-  const standings = useMemo(() => buildStandings(roster, allPicks), [roster, allPicks]);
+  const standings = useMemo(() => buildStandings(visibleRoster, allPicks), [visibleRoster, allPicks]);
   const showSelector = supabaseConfigured && playerReady && !selectedPlayer && activeView !== "admin" && activeView !== "profile";
   const showLeague = !supabaseConfigured || Boolean(selectedPlayer) || activeView === "admin" || activeView === "profile";
 
@@ -106,8 +107,9 @@ export function AppShell() {
       if (!response.ok) throw new Error(payload.error ?? "Unable to load league data.");
 
       const players = Array.isArray(payload.players) ? payload.players : [];
-      const active = Array.isArray(payload.activePlayers) ? payload.activePlayers : players.filter((player: Player) => player.active !== false);
-      setRoster(players);
+      const visiblePlayers = players.filter((player: Player) => player.active !== false);
+      const active = Array.isArray(payload.activePlayers) ? payload.activePlayers.filter((player: Player) => player.active !== false) : visiblePlayers;
+      setRoster(visiblePlayers);
       setActivePlayers(active);
       setWeekGames(Array.isArray(payload.games) ? payload.games.sort(sortByKickoff) : []);
       setAllPicks(Array.isArray(payload.picks) ? payload.picks : []);
@@ -349,9 +351,9 @@ export function AppShell() {
                 onSelect={setPendingGame}
               />
             )}
-            {activeView === "week" && <WeekScreen allPicks={allPicks} roster={roster} revealed={revealed} />}
+            {activeView === "week" && <WeekScreen allPicks={allPicks} roster={visibleRoster} revealed={revealed} />}
             {activeView === "standings" && <StandingsScreen standings={standings} />}
-            {activeView === "history" && <HistoryScreen allPicks={allPicks} roster={roster} auditEvents={auditEvents} />}
+            {activeView === "history" && <HistoryScreen allPicks={allPicks} roster={visibleRoster} auditEvents={auditEvents} />}
             {activeView === "profile" && (
               <ProfileScreen
                 activePlayers={activePlayers}
@@ -368,7 +370,7 @@ export function AppShell() {
                 oddsStatus={oddsStatus}
                 oddsMode={oddsMode}
                 oddsSummary={oddsSummary}
-                roster={roster}
+                roster={visibleRoster}
                 activePlayers={activePlayers}
                 weekGames={weekGames}
                 addPlayer={addPlayer}
@@ -436,13 +438,20 @@ function PickScreen({
   onSelect: (game: Game) => void;
 }) {
   const chronologicalGames = [...weekGames].sort(sortByKickoff);
+  const selectedGame = myPick ? weekGames.find((game) => game.id === myPick.gameId) : null;
+  const existingPickLocked = Boolean(myPick && (myPick.locked || (selectedGame && hasGameStarted(selectedGame))));
 
   return (
     <div className="space-y-6">
       <PageIntro eyebrow={`2026 Week ${currentWeek}`} title="Choose One Underdog" detail="All games are listed chronologically. Games lock automatically at kickoff." />
-      {myPick && (
+      {myPick && !existingPickLocked && (
         <div className="rounded border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
           Change Pick is open until the game you already picked kicks off. Your previous spread snapshot stays in the audit history.
+        </div>
+      )}
+      {existingPickLocked && (
+        <div className="rounded border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm text-emerald-100">
+          Your pick is locked because its game has kicked off.
         </div>
       )}
       <div className={`rounded border p-4 text-sm ${oddsMode === "live" ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100" : "border-amber-400/30 bg-amber-400/10 text-amber-100"}`}>
@@ -456,7 +465,13 @@ function PickScreen({
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {chronologicalGames.map((game) => (
-            <MatchupCard key={game.id} game={game} selected={myPick?.gameId === game.id} onSelect={() => onSelect(game)} />
+            <MatchupCard
+              key={game.id}
+              game={game}
+              selected={myPick?.gameId === game.id}
+              selectionLocked={existingPickLocked}
+              onSelect={() => onSelect(game)}
+            />
           ))}
         </div>
       )}
@@ -464,7 +479,17 @@ function PickScreen({
   );
 }
 
-function MatchupCard({ game, selected, onSelect }: { game: Game; selected?: boolean; onSelect: () => void }) {
+function MatchupCard({
+  game,
+  selected,
+  selectionLocked,
+  onSelect,
+}: {
+  game: Game;
+  selected?: boolean;
+  selectionLocked?: boolean;
+  onSelect: () => void;
+}) {
   const home = getTeam(game.homeTeamId);
   const away = getTeam(game.awayTeamId);
   const underdog = getUnderdog(game);
@@ -497,12 +522,12 @@ function MatchupCard({ game, selected, onSelect }: { game: Game; selected?: bool
         )}
       </div>
       <button
-        disabled={!underdog || locked}
+        disabled={!underdog || locked || selectionLocked}
         onClick={onSelect}
         className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded bg-red-600 text-sm font-black uppercase text-white disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
       >
-        {locked ? <Lock className="h-4 w-4" /> : <Check className="h-4 w-4" />}
-        {locked ? "Locked" : selected ? "Change Pick" : underdogTeam ? `Pick ${underdogTeam.abbreviation}` : "Unavailable"}
+        {locked || selectionLocked ? <Lock className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+        {selectionLocked ? "Pick Locked" : locked ? "Locked" : selected ? "Change Pick" : underdogTeam ? `Pick ${underdogTeam.abbreviation}` : "Unavailable"}
       </button>
     </article>
   );

@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createServiceClient } from "@/lib/supabase/server";
+import { postgresUuidSchema } from "@/lib/validation";
 
 const submitPickSchema = z.object({
-  participantId: z.string().uuid(),
+  participantId: postgresUuidSchema,
   season: z.number().int(),
   week: z.number().int().min(1).max(22),
-  gameId: z.string().uuid(),
+  gameId: postgresUuidSchema,
   selectedTeamId: z.string(),
 });
 

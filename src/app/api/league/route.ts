@@ -90,6 +90,10 @@ export async function GET() {
     if (auditError) throw auditError;
     if (refreshError) throw refreshError;
 
+    const activeProfiles = (profiles ?? []).filter((profile) => profile.active ?? true);
+    const activeProfileIds = new Set(activeProfiles.map((profile) => profile.id));
+    const visiblePicks = (picks ?? []).filter((pick) => activeProfileIds.has(pick.user_id));
+    const visibleAuditEvents = (auditEvents ?? []).filter((event) => activeProfileIds.has(event.participant_id));
     const teamAbbrById = new Map((teams ?? []).map((team) => [team.id, team.abbreviation]));
     const latestOddsByGame = new Map<string, { home_spread: number; away_spread: number; fetched_at: string }>();
     for (const oddsRow of odds ?? []) {
@@ -138,24 +142,22 @@ export async function GET() {
         requestsRemaining: latestRefresh?.requests_remaining ?? null,
         requestsUsed: latestRefresh?.requests_used ?? null,
       },
-      players: (profiles ?? []).map((profile) => ({
+      players: activeProfiles.map((profile) => ({
         id: profile.id,
         displayName: profile.display_name,
         avatarUrl: profile.avatar_url ?? undefined,
         role: profile.role,
-        active: profile.active ?? true,
+        active: true,
       })),
-      activePlayers: (profiles ?? [])
-        .filter((profile) => profile.active ?? true)
-        .map((profile) => ({
-          id: profile.id,
-          displayName: profile.display_name,
-          avatarUrl: profile.avatar_url ?? undefined,
-          role: profile.role,
-          active: true,
-        })),
+      activePlayers: activeProfiles.map((profile) => ({
+        id: profile.id,
+        displayName: profile.display_name,
+        avatarUrl: profile.avatar_url ?? undefined,
+        role: profile.role,
+        active: true,
+      })),
       games: visibleGames,
-      picks: (picks ?? []).map((pick) => ({
+      picks: visiblePicks.map((pick) => ({
         id: pick.id,
         userId: pick.user_id,
         season: activeSeason.year,
@@ -168,11 +170,11 @@ export async function GET() {
         result: pick.result,
         pointsEarned: Number(pick.points_earned),
         locked: pick.locked,
-        changed: (auditEvents ?? []).some(
+        changed: visibleAuditEvents.some(
           (event) => event.pick_id === pick.id && event.action_type === "changed",
         ),
       })),
-      auditEvents: auditEvents ?? [],
+      auditEvents: visibleAuditEvents,
     });
   } catch (error) {
     return NextResponse.json(

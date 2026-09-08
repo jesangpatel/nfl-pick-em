@@ -1,6 +1,6 @@
 # Live Test Checklist
 
-Run these after deploying the latest code and applying migration `005`.
+Run these after deploying the latest code and applying migration `006`.
 
 ## Test A - New Player / Browser
 
@@ -74,3 +74,20 @@ Run these after deploying the latest code and applying migration `005`.
 1. Open production with Supabase configured.
 2. Confirm only rows from `public.profiles` appear.
 3. Confirm Jesang, Varun, Ryan, or Nick do not appear unless you manually added them.
+
+## Test L - Inactive Players Stay Hidden
+
+1. Open Admin with the admin key.
+2. Deactivate a participant.
+3. Confirm the participant disappears from player selection, weekly picks, standings, history, profile selection, and the Admin roster list.
+4. In Supabase, confirm the profile row and any old picks still exist.
+
+## Test M - cron-job.org
+
+1. Set the cron-job.org URL to `https://YOUR-VERCEL-DOMAIN.vercel.app/api/cron/odds`.
+2. Set method to `GET`.
+3. Add custom header `Authorization` with value `Bearer YOUR_CRON_SECRET`.
+4. Run the job manually.
+5. Confirm cron-job.org sees HTTP `200`.
+6. If the response has `"refreshed": true`, check Admin and `odds_refresh_log` for a success row.
+7. If the response has `"refreshed": false`, the cron call worked but cadence or budget correctly skipped the provider request.

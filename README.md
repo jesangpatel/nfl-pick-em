@@ -20,7 +20,7 @@ This is a trusted private pool. Someone could intentionally choose another name 
 - Production roster rows live in `public.profiles`.
 - Production does not auto-create fake users.
 - If Supabase has zero active players, the app shows an empty state.
-- Inactive players stay in the database so old picks and results remain historical.
+- Inactive players stay in the database so old picks and results remain historical, but production API responses hide them from player selection, weekly picks, standings, history, profile selection, and the Admin roster list.
 - Local demo names are used only when Supabase environment variables are not configured.
 
 ## Odds Rules
@@ -88,8 +88,9 @@ Run migrations in order:
 3. `supabase/migrations/003_lock_pick_changes_after_selected_game_starts.sql`
 4. `supabase/migrations/004_promote_jesang_admin.sql`
 5. `supabase/migrations/005_no_auth_participants_and_pick_audit.sql`
+6. `supabase/migrations/006_harden_pick_submission_and_visibility.sql`
 
-If `001` through `004` were already run, do not rerun them. Run only `005`.
+If `001` through `005` were already run, do not rerun them. Run only `006`.
 
 Then run `supabase/seed.sql` only if your seasons, weeks, teams, and starter games are not already loaded. The seed includes local fallback odds marked as `source = 'demo'`; production ignores those for live DraftKings display.
 
@@ -114,21 +115,33 @@ The app keeps the 430-credit rolling 30-day cap.
 - Started games are ignored for urgency.
 - Repeated refreshes cannot bypass the monthly cap.
 
-Vercel Cron should call `/api/cron/odds` with:
+cron-job.org should call the deployed Vercel URL:
 
 ```txt
+URL: https://YOUR-VERCEL-DOMAIN.vercel.app/api/cron/odds
+Method: GET
 Authorization: Bearer YOUR_CRON_SECRET
 ```
 
+In cron-job.org, add that as a custom request header named `Authorization` with the value `Bearer YOUR_CRON_SECRET`. Do not put the secret in the URL. The route also accepts `POST` and an `x-cron-secret` header for compatibility, but the recommended setup is `GET` plus the `Authorization` bearer header above.
+
+Expected cron responses:
+
+- `200` with `{"refreshed":true,...}` when an odds refresh runs.
+- `200` with `{"refreshed":false,...}` when the cadence says it is not time yet.
+- `401` when the header is missing or does not match `CRON_SECRET`.
+- `503` when `CRON_SECRET` is not configured in Vercel.
+- `500` for provider, Supabase, or persistence failures. These are written to `odds_refresh_log` with secrets redacted.
+
 ## API Routes
 
-- `GET /api/league` returns real players, games, current DraftKings odds status, picks, and audit summaries.
+- `GET /api/league` returns active players, games, current DraftKings odds status, active-player picks, and audit summaries.
 - `POST /api/picks` submits/changes a participant pick through `public.submit_participant_weekly_pick`.
-- `GET /api/players` lists participants.
+- `GET /api/players` lists active participants.
 - `POST /api/players` adds a participant; requires `x-admin-key`.
 - `PATCH /api/players` activates/deactivates a participant; requires `x-admin-key`.
 - `POST /api/odds` manually refreshes DraftKings odds; requires `x-admin-key`.
-- `GET /api/cron/odds` refreshes odds only when cadence and budget allow.
+- `GET` or `POST /api/cron/odds` refreshes odds only when cadence and budget allow.
 - `GET /api/scores` reads NFL scores from The Odds API.
 
 ## Deploy

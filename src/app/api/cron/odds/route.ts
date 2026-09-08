@@ -11,16 +11,22 @@ const weekOneWindow = {
 };
 
 export async function GET(request: Request) {
-  const authHeader = request.headers.get("authorization");
-  const expected = process.env.CRON_SECRET;
-  if (expected && authHeader !== `Bearer ${expected}`) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  return runCronOddsRefresh(request);
+}
+
+export async function POST(request: Request) {
+  return runCronOddsRefresh(request);
+}
+
+async function runCronOddsRefresh(request: Request) {
+  const authFailure = getCronAuthFailure(request);
+  if (authFailure) return authFailure;
 
   const now = new Date();
   let supabase: ReturnType<typeof createServiceClient> | null = null;
 
   try {
+    console.info("[cron/odds] Authorized odds refresh check started.");
     supabase = createServiceClient();
     const { data: activeSeason, error: seasonError } = await supabase
       .from("seasons")
@@ -77,11 +83,16 @@ export async function GET(request: Request) {
     });
 
     if (!decision.shouldRefresh) {
+      console.info(`[cron/odds] Skipped refresh: ${decision.reason}`);
       return NextResponse.json({ refreshed: false, decision });
     }
 
     const provider = new TheOddsApiDraftKingsProvider();
     const result = await provider.refreshOdds(weekOneWindow);
+    if (result.games.length === 0) {
+      throw new Error("No DraftKings NFL spread events were returned by The Odds API for this window.");
+    }
+
     const persisted = await persistDraftKingsOdds({
       supabase,
       games: result.games,
@@ -100,6 +111,7 @@ export async function GET(request: Request) {
     });
     if (logError) throw logError;
 
+    console.info(`[cron/odds] Refreshed ${result.games.length} games and inserted ${persisted.oddsInserted} odds rows.`);
     return NextResponse.json({
       refreshed: true,
       decision,
@@ -111,18 +123,39 @@ export async function GET(request: Request) {
   } catch (error) {
     const message = sanitizeError(error);
     if (supabase) {
-      await supabase.from("odds_refresh_log").insert({
+      const { error: logError } = await supabase.from("odds_refresh_log").insert({
+        fetched_at: new Date().toISOString(),
         credits_used: 1,
         source: "the-odds-api",
         status: "error",
         notes: `Cron odds refresh failed: ${message}`,
       });
+      if (logError) console.error(`[cron/odds] Failed to write error log: ${sanitizeError(logError)}`);
     }
+    console.error(`[cron/odds] Refresh failed: ${message}`);
     return NextResponse.json(
       { error: message },
       { status: 500 },
     );
   }
+}
+
+function getCronAuthFailure(request: Request) {
+  const expected = process.env.CRON_SECRET?.trim();
+  if (!expected) {
+    console.error("[cron/odds] CRON_SECRET is not configured.");
+    return NextResponse.json({ error: "CRON_SECRET is not configured." }, { status: 503 });
+  }
+
+  const authorization = request.headers.get("authorization")?.trim() ?? "";
+  const bearerSecret = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  const headerSecret = request.headers.get("x-cron-secret")?.trim();
+  if (bearerSecret !== expected && headerSecret !== expected) {
+    console.warn("[cron/odds] Unauthorized cron request.");
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  return null;
 }
 
 function sanitizeError(error: unknown) {
